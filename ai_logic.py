@@ -6,6 +6,30 @@ import time
 def configure_genai(api_key):
     genai.configure(api_key=api_key)
 
+def upload_file_to_gemini(file_path, mime_type="application/pdf"):
+    """
+    Sube un archivo a la API de archivos de Gemini para ser usado en los prompts.
+    Retorna el objeto File de la API.
+    """
+    try:
+        print(f"Subiendo archivo {file_path} a Gemini...")
+        file_obj = genai.upload_file(file_path, mime_type=mime_type)
+        print(f"Archivo subido: {file_obj.uri}")
+        
+        # Esperar a que el archivo esté activo (procesado)
+        while file_obj.state.name == "PROCESSING":
+            print("Procesando archivo en Gemini...")
+            time.sleep(2)
+            file_obj = genai.get_file(file_obj.name)
+            
+        if file_obj.state.name == "FAILED":
+            raise Exception("El procesamiento del archivo en Gemini falló.")
+            
+        return file_obj
+    except Exception as e:
+        print(f"Error subiendo archivo a Gemini: {e}")
+        raise e
+
 def clean_json_string(text_response):
     """Limpia el string de respuesta para obtener solo el JSON."""
     text_response = text_response.strip()
@@ -17,19 +41,20 @@ def clean_json_string(text_response):
         text_response = text_response[:-3]
     return text_response.strip()
 
-def generate_with_fallback(prompt):
+def generate_with_fallback(contents):
     """
     Intenta generar contenido usando una lista de modelos disponibles.
+    Accepta 'contents' que puede ser una lista [prompt, file_obj].
     Si el primero falla (ej. 404 Not Found), intenta el siguiente.
     Retorna el objeto response o lanza la última excepción.
     """
-    # Lista de modelos a probar en orden de preferencia
+    # Lista de modelos MULTIMODALES (que aceptan archivos/PDF)
     models_to_try = [
         'gemini-1.5-flash',
-        'gemini-1.5-flash-001',
         'gemini-1.5-flash-latest',
-        'gemini-pro',
-        'gemini-1.5-pro'
+        'gemini-1.5-flash-001',
+        'gemini-1.5-pro',
+        'gemini-1.5-pro-latest'
     ]
     
     last_exception = None
@@ -38,7 +63,7 @@ def generate_with_fallback(prompt):
         try:
             print(f"Intentando generar con modelo: {model_name}...")
             model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
+            response = model.generate_content(contents)
             return response
         except Exception as e:
             print(f"Fallo con modelo {model_name}: {e}")
@@ -49,19 +74,15 @@ def generate_with_fallback(prompt):
     if last_exception:
         raise last_exception
 
-def generate_questions_from_report(report_text):
+def generate_questions_from_report(gemini_file):
     """
-    Analiza el texto del boletín y genera 5 preguntas personalizadas.
+    Analiza el boletín (objeto archivo Gemini) y genera 5 preguntas personalizadas.
     Retorna una lista de strings.
     """
-    prompt = f"""
-    Actúa como un orientador vocacional experto. He analizado el siguiente boletín de notas de un estudiante:
+    prompt = """
+    Actúa como un orientador vocacional experto. Analiza este boletín de notas (PDF).
     
-    '''
-    {report_text}
-    '''
-    
-    Basado en su desempeño académico (sus fortalezas y debilidades), genera una lista de 5 preguntas clave para entender mejor sus intereses, personalidad y preferencias laborales. 
+    Basado en el desempeño académico visible (notas, materias, comentarios si los hay), genera una lista de 5 preguntas clave para entender mejor los intereses, personalidad y preferencias laborales del estudiante.
     Las preguntas deben ser abiertas pero específicas.
     
     IMPORTANTE: Tu respuesta debe ser ESTRICTAMENTE una lista JSON de strings válida. 
@@ -72,14 +93,15 @@ def generate_questions_from_report(report_text):
     """
     
     try:
-        response = generate_with_fallback(prompt)
+        # Enviamos el prompt y el archivo
+        response = generate_with_fallback([prompt, gemini_file])
         text_response = clean_json_string(response.text)
             
         questions = json.loads(text_response)
         return questions
     except Exception as e:
         print(f"Error generando preguntas (todos los modelos fallaron): {e}")
-        # Preguntas por defecto en caso de error
+        # Retornamos error explicito para la UI si es posible, o fallback questions
         return [
             "¿Qué asignaturas disfrutas más estudiar y por qué?",
             "¿Prefieres trabajar solo o en equipo?",
@@ -88,11 +110,10 @@ def generate_questions_from_report(report_text):
             "¿Tienes algún hobby relacionado con la tecnología, el arte o la ciencia?"
         ]
 
-def get_career_recommendations(report_text, questions, answers):
+def get_career_recommendations(gemini_file, questions, answers):
     """
-    Genera recomendaciones de carrera basadas en el boletín y las respuestas.
-    Retorna una lista de diccionarios: [{'carrera': 'Nombre', 'porcentaje': 85, 'razon': '...'}]
-    Si hay error, retorna una lista vacía y el mensaje de error en print.
+    Genera recomendaciones de carrera basadas en el boletín (archivo Gemini) y las respuestas.
+    Retorna una lista de diccionarios.
     """
     qa_text = ""
     for q, a in zip(questions, answers):
@@ -101,18 +122,13 @@ def get_career_recommendations(report_text, questions, answers):
     prompt = f"""
     Actúa como un orientador vocacional experto. 
     
-    Información del estudiante:
-    1. Boletín de notas completo:
-    '''
-    {report_text}
-    '''
+    Tienes acceso al boletín de notas (archivo adjunto) y a la siguiente entrevista personal:
     
-    2. Entrevista personal:
     {qa_text}
     
     TAREA:
     Sugiere las 5 mejores carreras universitarias para este estudiante. 
-    Para cada carrera, asigna un porcentaje de afinidad (0-100) basado en sus notas y respuestas.
+    Para cada carrera, asigna un porcentaje de afinidad (0-100) basado en sus notas (del PDF) y sus respuestas.
     
     IMPORTANTE: Tu respuesta debe ser ESTRICTAMENTE una lista JSON de objetos con las claves: "carrera", "porcentaje" (entero), y "razon" (breve explicación).
     Ordena las carreras de mayor a menor porcentaje.
@@ -127,14 +143,13 @@ def get_career_recommendations(report_text, questions, answers):
     """
     
     try:
-        response = generate_with_fallback(prompt)
+        response = generate_with_fallback([prompt, gemini_file])
         text_response = clean_json_string(response.text)
             
         recommendations = json.loads(text_response)
         return recommendations
     except Exception as e:
-        print(f"Error generando recomendaciones (todos los modelos fallaron): {e}")
-        # Devolvemos un objeto de error especial para que la UI lo muestre
+        print(f"Error generando recomendaciones: {e}")
         raw_resp = 'No response'
         if 'response' in locals():
             try:
