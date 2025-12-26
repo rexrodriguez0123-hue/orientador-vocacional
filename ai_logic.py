@@ -1,6 +1,7 @@
 import google.generativeai as genai
 import os
 import json
+import time
 
 def configure_genai(api_key):
     genai.configure(api_key=api_key)
@@ -16,13 +17,43 @@ def clean_json_string(text_response):
         text_response = text_response[:-3]
     return text_response.strip()
 
+def generate_with_fallback(prompt):
+    """
+    Intenta generar contenido usando una lista de modelos disponibles.
+    Si el primero falla (ej. 404 Not Found), intenta el siguiente.
+    Retorna el objeto response o lanza la última excepción.
+    """
+    # Lista de modelos a probar en orden de preferencia
+    models_to_try = [
+        'gemini-1.5-flash',
+        'gemini-1.5-flash-001',
+        'gemini-1.5-flash-latest',
+        'gemini-pro',
+        'gemini-1.5-pro'
+    ]
+    
+    last_exception = None
+    
+    for model_name in models_to_try:
+        try:
+            print(f"Intentando generar con modelo: {model_name}...")
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            return response
+        except Exception as e:
+            print(f"Fallo con modelo {model_name}: {e}")
+            last_exception = e
+            time.sleep(1) # Breve pausa antes del siguiente intento
+            
+    # Si todos fallan, lanzamos la última excepción
+    if last_exception:
+        raise last_exception
+
 def generate_questions_from_report(report_text):
     """
     Analiza el texto del boletín y genera 5 preguntas personalizadas.
     Retorna una lista de strings.
     """
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    
     prompt = f"""
     Actúa como un orientador vocacional experto. He analizado el siguiente boletín de notas de un estudiante:
     
@@ -41,13 +72,13 @@ def generate_questions_from_report(report_text):
     """
     
     try:
-        response = model.generate_content(prompt)
+        response = generate_with_fallback(prompt)
         text_response = clean_json_string(response.text)
             
         questions = json.loads(text_response)
         return questions
     except Exception as e:
-        print(f"Error generando preguntas: {e}")
+        print(f"Error generando preguntas (todos los modelos fallaron): {e}")
         # Preguntas por defecto en caso de error
         return [
             "¿Qué asignaturas disfrutas más estudiar y por qué?",
@@ -63,8 +94,6 @@ def get_career_recommendations(report_text, questions, answers):
     Retorna una lista de diccionarios: [{'carrera': 'Nombre', 'porcentaje': 85, 'razon': '...'}]
     Si hay error, retorna una lista vacía y el mensaje de error en print.
     """
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    
     qa_text = ""
     for q, a in zip(questions, answers):
         qa_text += f"P: {q}\nR: {a}\n\n"
@@ -98,12 +127,18 @@ def get_career_recommendations(report_text, questions, answers):
     """
     
     try:
-        response = model.generate_content(prompt)
+        response = generate_with_fallback(prompt)
         text_response = clean_json_string(response.text)
             
         recommendations = json.loads(text_response)
         return recommendations
     except Exception as e:
-        print(f"Error generando recomendaciones: {e}")
+        print(f"Error generando recomendaciones (todos los modelos fallaron): {e}")
         # Devolvemos un objeto de error especial para que la UI lo muestre
-        return [{"error": str(e), "raw_response": getattr(response, 'text', 'No text generated') if 'response' in locals() else 'No response'}]
+        raw_resp = 'No response'
+        if 'response' in locals():
+            try:
+                raw_resp = response.text
+            except:
+                pass
+        return [{"error": str(e), "raw_response": raw_resp}]
