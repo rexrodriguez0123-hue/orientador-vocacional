@@ -5,6 +5,17 @@ import json
 def configure_genai(api_key):
     genai.configure(api_key=api_key)
 
+def clean_json_string(text_response):
+    """Limpia el string de respuesta para obtener solo el JSON."""
+    text_response = text_response.strip()
+    if text_response.startswith("```json"):
+        text_response = text_response[7:]
+    if text_response.startswith("```"):
+        text_response = text_response[3:]
+    if text_response.endswith("```"):
+        text_response = text_response[:-3]
+    return text_response.strip()
+
 def generate_questions_from_report(report_text):
     """
     Analiza el texto del boletín y genera 5 preguntas personalizadas.
@@ -16,25 +27,22 @@ def generate_questions_from_report(report_text):
     Actúa como un orientador vocacional experto. He analizado el siguiente boletín de notas de un estudiante:
     
     '''
-    {report_text[:4000]}  # Limitamos el texto para evitar tokens excesivos si es muy largo
+    {report_text}
     '''
     
     Basado en su desempeño académico (sus fortalezas y debilidades), genera una lista de 5 preguntas clave para entender mejor sus intereses, personalidad y preferencias laborales. 
     Las preguntas deben ser abiertas pero específicas.
     
-    IMPORTANTE: Tu respuesta debe ser ESTRICTAMENTE una lista JSON de strings. Ejemplo:
+    IMPORTANTE: Tu respuesta debe ser ESTRICTAMENTE una lista JSON de strings válida. 
+    Ejemplo:
     ["¿Pregunta 1?", "¿Pregunta 2?", ...]
-    No añadas markdown ```json ... ``` ni texto extra. Solo el array crudo.
+    
+    No añadas markdown ni texto extra antes o después del JSON.
     """
     
     try:
         response = model.generate_content(prompt)
-        text_response = response.text.strip()
-        # Limpieza básica por si el modelo incluye backticks
-        if text_response.startswith("```json"):
-            text_response = text_response[7:-3]
-        elif text_response.startswith("```"):
-            text_response = text_response[3:-3]
+        text_response = clean_json_string(response.text)
             
         questions = json.loads(text_response)
         return questions
@@ -53,6 +61,7 @@ def get_career_recommendations(report_text, questions, answers):
     """
     Genera recomendaciones de carrera basadas en el boletín y las respuestas.
     Retorna una lista de diccionarios: [{'carrera': 'Nombre', 'porcentaje': 85, 'razon': '...'}]
+    Si hay error, retorna una lista vacía y el mensaje de error en print.
     """
     model = genai.GenerativeModel('gemini-1.5-flash')
     
@@ -64,9 +73,9 @@ def get_career_recommendations(report_text, questions, answers):
     Actúa como un orientador vocacional experto. 
     
     Información del estudiante:
-    1. Boletín de notas (extracto):
+    1. Boletín de notas completo:
     '''
-    {report_text[:2000]}
+    {report_text}
     '''
     
     2. Entrevista personal:
@@ -90,15 +99,11 @@ def get_career_recommendations(report_text, questions, answers):
     
     try:
         response = model.generate_content(prompt)
-        text_response = response.text.strip()
-        
-        if text_response.startswith("```json"):
-            text_response = text_response[7:-3]
-        elif text_response.startswith("```"):
-            text_response = text_response[3:-3]
+        text_response = clean_json_string(response.text)
             
         recommendations = json.loads(text_response)
         return recommendations
     except Exception as e:
         print(f"Error generando recomendaciones: {e}")
-        return []
+        # Devolvemos un objeto de error especial para que la UI lo muestre
+        return [{"error": str(e), "raw_response": getattr(response, 'text', 'No text generated') if 'response' in locals() else 'No response'}]
