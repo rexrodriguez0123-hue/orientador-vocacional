@@ -2,8 +2,9 @@ import streamlit as st
 import os
 import plotly.express as px
 import pandas as pd
-from utils import extract_text_from_pdf
-from ai_logic import configure_genai, generate_questions_from_report, get_career_recommendations
+# Eliminamos la importación de extract_text_from_pdf ya que usaremos el archivo directo
+# from utils import extract_text_from_pdf
+from ai_logic import configure_genai, generate_questions_from_report, get_career_recommendations, upload_file_to_gemini
 
 # Configuración de la página
 st.set_page_config(
@@ -31,13 +32,11 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 st.title("🎓 Orientador Vocacional con IA")
-st.write("Descubre tu futuro profesional analizando tus notas y preferencias.")
+st.write("Descubre tu futuro profesional analizando tus notas (incluyendo imágenes) y preferencias.")
 
 # --- Configuración de API Key ---
-# Intentamos obtenerla de las variables de entorno (para Render/Local .env)
 api_key = os.environ.get("GOOGLE_API_KEY")
 
-# Si no está en el entorno, la pedimos en el sidebar
 with st.sidebar:
     st.header("Configuración")
     if not api_key:
@@ -45,7 +44,7 @@ with st.sidebar:
         if api_key_input:
             api_key = api_key_input
             os.environ["GOOGLE_API_KEY"] = api_key_input
-        st.info("Necesitas una API Key de Google Gemini. [Consíguela aquí](https://aistudio.google.com/app/apikey).")
+        st.info("Necesitas una API Key de Google Gemini.")
     else:
         st.success("API Key detectada ✅")
 
@@ -54,7 +53,6 @@ with st.sidebar:
             del st.session_state[key]
         st.rerun()
 
-# Validar que tengamos API Key antes de continuar
 if not api_key:
     st.warning("👈 Por favor, ingresa tu API Key en la barra lateral para comenzar.")
     st.stop()
@@ -64,8 +62,9 @@ configure_genai(api_key)
 # --- Estado de la Sesión ---
 if 'step' not in st.session_state:
     st.session_state.step = 1
-if 'report_text' not in st.session_state:
-    st.session_state.report_text = ""
+# gemini_file guardará la referencia al archivo subido en la nube de Google
+if 'gemini_file' not in st.session_state:
+    st.session_state.gemini_file = None
 if 'questions' not in st.session_state:
     st.session_state.questions = []
 if 'answers' not in st.session_state:
@@ -78,26 +77,39 @@ if 'recommendations' not in st.session_state:
 # ==========================================
 if st.session_state.step == 1:
     st.header("1. Sube tu Boletín de Notas")
-    st.write("Sube el PDF de tu último año escolar.")
+    st.write("Sube el PDF de tu último año escolar. La IA analizará tanto texto como imágenes.")
     
     uploaded_file = st.file_uploader("Elige un archivo PDF", type="pdf")
     
     if uploaded_file is not None:
         if st.button("Analizar Boletín y Continuar"):
-            with st.spinner("Leyendo PDF y analizando tu perfil académico..."):
-                text = extract_text_from_pdf(uploaded_file)
-                if len(text) < 50:
-                    st.error("No se pudo extraer suficiente texto del PDF. Asegúrate de que no sea una imagen escaneada.")
-                else:
-                    st.session_state.report_text = text
-                    # Generar preguntas con IA
-                    questions = generate_questions_from_report(text)
+            with st.spinner("Subiendo PDF a Gemini y analizando (esto puede tomar unos segundos)..."):
+                try:
+                    # 1. Guardar archivo temporalmente
+                    temp_filename = "temp_report.pdf"
+                    with open(temp_filename, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+                    
+                    # 2. Subir a Gemini
+                    g_file = upload_file_to_gemini(temp_filename)
+                    st.session_state.gemini_file = g_file
+                    
+                    # 3. Generar preguntas
+                    questions = generate_questions_from_report(g_file)
+                    
+                    # Limpiar archivo temporal local (opcional, el de Gemini persiste por 48h)
+                    if os.path.exists(temp_filename):
+                        os.remove(temp_filename)
+                        
                     if not questions:
                         st.error("No se pudieron generar las preguntas. Intenta de nuevo.")
                     else:
                         st.session_state.questions = questions
                         st.session_state.step = 2
                         st.rerun()
+                        
+                except Exception as e:
+                    st.error(f"Error procesando el archivo: {e}")
 
 # ==========================================
 # PASO 2: CUESTIONARIO
@@ -106,8 +118,8 @@ elif st.session_state.step == 2:
     st.header("2. Conociéndote mejor")
     st.write("La IA ha generado estas preguntas basándose en tus notas para afinar la recomendación.")
     
-    with st.expander("Ver texto extraído del boletín (para depuración)"):
-        st.markdown(f'<div class="report-view">{st.session_state.report_text}</div>', unsafe_allow_html=True)
+    # Nota: Ya no podemos mostrar el texto extraído porque Gemini lee el archivo directamente en la nube.
+    st.info("El boletín ha sido procesado directamente por la IA (incluyendo imágenes y gráficos).")
 
     with st.form("questions_form"):
         answers = []
@@ -118,14 +130,13 @@ elif st.session_state.step == 2:
         submitted = st.form_submit_button("Obtener mis Carreras Ideales")
         
         if submitted:
-            # Validar que haya respondido algo (opcional, pero recomendado)
             if any(len(a.strip()) < 2 for a in answers):
                 st.warning("Por favor, responde todas las preguntas con un poco más de detalle.")
             else:
                 st.session_state.answers = answers
                 with st.spinner("La IA está cruzando tus datos para encontrar tu vocación..."):
                     recs = get_career_recommendations(
-                        st.session_state.report_text, 
+                        st.session_state.gemini_file, 
                         st.session_state.questions, 
                         answers
                     )
@@ -142,7 +153,7 @@ elif st.session_state.step == 3:
     
     recs = st.session_state.recommendations
     
-    # Verificamos si hubo un error en la respuesta (si contiene la clave 'error')
+    # Verificación de errores
     error_found = False
     if recs and isinstance(recs, list) and len(recs) > 0 and 'error' in recs[0]:
         error_found = True
@@ -153,17 +164,15 @@ elif st.session_state.step == 3:
         st.error("Hubo un problema generando las recomendaciones.")
         if error_found:
             st.warning(f"Detalle del error: {error_msg}")
-            with st.expander("Ver respuesta cruda de la IA (para depuración)"):
+            with st.expander("Ver respuesta cruda de la IA"):
                 st.code(raw_resp)
         
         if st.button("Volver atrás e intentar de nuevo"):
             st.session_state.step = 2
             st.rerun()
     else:
-        # Preparar datos para el gráfico
+        # Gráfico
         df = pd.DataFrame(recs)
-        
-        # Gráfico de Barras Horizontales
         fig = px.bar(
             df, 
             x='porcentaje', 
@@ -176,7 +185,7 @@ elif st.session_state.step == 3:
             color_continuous_scale='Viridis'
         )
         fig.update_traces(texttemplate='%{text}%', textposition='outside')
-        fig.update_layout(yaxis={'categoryorder':'total ascending'}) # Ordenar de mayor a menor
+        fig.update_layout(yaxis={'categoryorder':'total ascending'}) 
         
         st.plotly_chart(fig, use_container_width=True)
         
@@ -187,7 +196,7 @@ elif st.session_state.step == 3:
         
         if st.button("Comenzar de nuevo"):
             st.session_state.step = 1
-            st.session_state.report_text = ""
+            st.session_state.gemini_file = None
             st.session_state.questions = []
             st.session_state.recommendations = []
             st.rerun()
